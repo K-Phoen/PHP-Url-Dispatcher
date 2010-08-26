@@ -52,20 +52,19 @@ class Rule {
     const TYPE_FILE     = 2;
     
     protected $pattern;
-    protected $dest;
+    protected $target;
     protected $name;
     protected $url;
     protected $type = Null;  // cb (for callback) or file
     protected $extra_data = array();
     
-    public function __construct($name, $pattern, $url, $dest, &$options, &$get_data)
+    public function __construct($name, $pattern, $url, $target, $options)
     {
         $this->name = $name;
         $this->url = $url;
         $this->pattern = $pattern;
-        $this->dest = $dest;
+        $this->target = $target;
         $this->extra_data = $options;
-        $this->get_data = $get_data;
     }
     
     /**
@@ -76,13 +75,13 @@ class Rule {
     * 
     * @return void
     */
-    public function mergeExtraData(array &$array)
+    public function mergeExtraData(array $array)
     {
         $this->extra_data = array_merge($this->extra_data, $array);
     }
     
     /**
-    * Get an option nammed $key
+    * Get an option named $key
     * 
     * @param $key Option name
     * @param $default Defaut value if the $key option doesn't exists
@@ -95,23 +94,13 @@ class Rule {
     }
     
     /**
-     * Returns the GET data to add to the request
-     * 
-     * @return array
-     */
-    public function getGetData()
-    {
-        return $this->get_data;
-    }
-    
-    /**
      * Return the url corresponding to the rule
      * 
      * @param &$params The parameters to use to format the URL with
      * 
      * @return string
      */
-    public function getURL(array &$params=array())
+    public function getURL(array $params=array())
     {
         return vsprintf($this->url, $params);
     }
@@ -137,33 +126,33 @@ class Rule {
     }
     
     /**
-    * Return the destination file or callback
+    * Return the target file or callback
     * 
     * @return string|callback
     */
-    public function getDest()
+    public function getTarget()
     {
-        return $this->dest;
+        return $this->target;
     }
     
     /**
-    * Return the destination type (use class constants TYPE_FILE and
+    * Return the target type (use class constants TYPE_FILE and
     * TYPE_CALLBACK to compare with the return value)
     * 
     * @return int (TYPE_FILE || TYPE_CALLBACK)
     **/
-    public function getDestType()
+    public function gettargetType()
     {
         if($this->type !== Null)
             return $this->type;
         
         $callable_name = '';
-        if(!is_callable($this->dest, False, $callable_name)) // only do this if the object is used ?
+        if(!is_callable($this->target, False, $callable_name))
             $this->type = self::TYPE_FILE;
         else
         {
             $this->type = self::TYPE_CALLBACK;
-            $this->dest = $callable_name;
+            $this->target = $callable_name;
         }
         
         return $this->type;
@@ -237,16 +226,13 @@ class UrlDispatcher {
     * Add an unique Rule to the dispatcher
     * 
     * @param $name Rule's name
-    * @param $pattern Pattern
-    * @param $url URL corresponding to the pattern
-    * @param $dest Destination to link with the matched urls (file or callback)
-    * @param $extra_data Additionnal parameters
+    * @param $data Rule's infos
     *   
     * @return void
     */
-    public function addPattern($name, $pattern, $url, $dest, array $extra_data=array())
+    public function addPattern($name, array $data)
     {
-        $this->added_data[$name] = array($pattern, $dest, $url, $extra_data);
+        $this->added_data[$name] = $data;
     }
     
     /**
@@ -290,59 +276,71 @@ class UrlDispatcher {
     * Used to create and stock a mapping rule with the given options
     * 
     * @param $name Rule name
-    * @param $options Options array :
-    *   array('pattern', 'url', 'callback|file', ('GET' => array('var' => 'value'))?, ('params' => array('var' => 'value'))?)
+    * @param $options Options (like this :
+    *                   'rule-name' => array(
+    *                                   'regex'  => '^foo/bar/(?P<baz>\d+)/barz/$',
+    *                                   'url'    => 'foo/bar/(?P<baz>\d+)/barz/',
+    *                                   'target' => 'some_folder/file.php',
+    *                                   'action' => 'exec',
+    *                                   'GET' => array('var' => True)
+    *                            ),
+    *                   'minimalist-rule' => array(
+    *                                   'regex'  => '^foo/bar/$',
+    *                                   'target' => 'foo.php' // the url will be guessed using the regex
+    *                           )
     * 
     * @return Rule : the created rule
     */
-    private function _makeRule($name, array &$options)
+    private function _makeRule($name, array $options)
     {
+        static $needed_keys = array('regex', 'target');
+        
+        // all the needed keys are here
+        foreach($needed_keys as $key)
+            if(!isset($options[$key]))
+                throw new Error500('Missing « '.$key.' » option for the rule « '.$name.' »');
+        
+        // check the existence of a rule with the same name
         if(isset($this->rules[$name]))
             throw new Error500('A rule named « '.$name.' » already exists.');
         
-        $count = count($options);
+        // define the rule's url
+        $url = isset($options['url']) ? $options['url'] : $this->guessURL($options['regex']);
         
-        if($count < 2)
-            throw new Error500('Rule « '.$name.' » is malformed (we expect at least 2 parameters to create a rule : only '.$count.' found).');
-        
-        $pattern = array_shift($options);
-        $url = ($count == 2) ? $this->guessURL($pattern) : array_shift($options);
-        $destination = array_shift($options);
-        
-        $get_data = array();
-        if(isset($options['GET']))
-        {
-            if(!is_array($options['GET']))
-                throw new Error500('Rule « '.$name.' » is malformed (GET parameter must be an array).');
-            
-            $get_data = $options['GET'];
-        }
-        
+        // try to parse the parameters to add to the rule
         $params = array();
         if(isset($options['params']))
         {
             if(!is_array($options['params']))
-                throw new Error500('Rule « '.$name.' » is malformed (params parameter must be an array).');
+                throw new Error500('Rule « '.$name.' » is malformed (« params » parameter must be an array).');
             
             $params = $options['params'];
         }
         
-        $rule = new Rule($name, $pattern, $url, $destination, $params, $get_data);
+        if(isset($options['GET']))
+        {
+            if(!is_array($options['GET']))
+                throw new Error500('Rule « '.$name.' » is malformed (« GET » parameter must be an array).');
+            
+            $params['GET'] = $options['GET'];
+        }
         
-        $this->rules[$rule->getName()] = $rule;
+        $rule = new Rule($name, $options['regex'], $url, $options['target'], $params);
+        
+        $this->rules[$name] = $rule;
         
         return $rule;
     }
 
     /**
-    *   We handle the requested URl with the previously given patterns.
+    * We handle the requested URl with the previously given patterns.
     * 
-    *   string $requested_url :: requested URL
-    *   bool $args_in_GET :: if True, matched params will be merged with
-    *                        $_GET. Else they'll be send to a callback
+    * string $requested_url :: requested URL
+    * bool $args_in_GET :: if True, matched params will be merged with
+    *                      $_GET. Else they'll be send to a callback
     *   
-    *   return bool :: match found ?
-    **/
+    * return void
+    */
     public function handle($requested_url='', $args_in_GET=False)
     {
         if(empty($requested_url))
@@ -369,27 +367,27 @@ class UrlDispatcher {
             // we "clean" the parameters
             $args = $this->_filterCallbackParams($matches);
             // we add the "params" to the matched parameters
-            $get_args = array_merge($args, $rule->getGetData());
-            $_GET = is_null($_GET) ? array() : $_GET;
+            $get_args = array_merge($args, $rule->getExtraData('GET', array()));
+            $_GET = $_GET ?: array();
             
-            if($rule->getDestType() == Rule::TYPE_CALLBACK)
+            if($rule->getTargetType() == Rule::TYPE_CALLBACK)
             {
                 // we call ... the callback !
                 if(!$args_in_GET OR $rule->getExtraData('args_in_get', True) === False)
                     // we send the params to the callback
-                    call_user_func_array($rule->getDest(), $args);
+                    call_user_func_array($rule->getTarget(), $args);
                 else
                 {
                     // or we put the params into $_GET
                     $_GET = array_merge($_GET, $get_args);
                     
-                    call_user_func($rule->getDest());
+                    call_user_func($rule->getTarget());
                 }
             }
             // a file is associated with the pattern
             else
             {
-                $file = $this->files_dir.'/'.$rule->getDest();
+                $file = (!$this->files_dir ? '' : $this->files_dir.'/').$rule->getTarget();
                 
                 if(!is_file($file))
                     throw new Error500('file « '.$file.' » not found.');
